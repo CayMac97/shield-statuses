@@ -1,175 +1,85 @@
 // Shield Statuses runtime module
-use std::sync::atomic::{AtomicBool, Ordering};
+// Shimmers 3D shield model: Green when ready to block, Red when broken/on cooldown.
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
 pub const ID: &str = "shield_statuses";
 pub const NAME: &str = "Shield Statuses";
 pub const VERSION: &str = "1.0.0";
 pub const DESCRIPTION: &str =
-    "PvP Shield awareness: live cooldown countdown, readiness, durability, and target shield status.";
+    "3D Shield indicator: shimmers green when ready to block and red when broken or on cooldown.";
 
 pub const KEY_TOGGLE: &str = "toggle";
 pub const KEY_TOGGLE_LABEL: &str = "Toggle Shield Statuses";
 pub const KEY_TOGGLE_DEFAULT: &str = "key.keyboard.unknown";
 
-// Color constants (0xAARRGGBB)
-pub const COLOR_READY: u32 = 0xFF00FF7F;     // Spring Green (Ready to block)
-pub const COLOR_BLOCKING: u32 = 0xFF00D2FF;  // Vivid Cyan (Actively blocking)
-pub const COLOR_DISABLED: u32 = 0xFFFF3333;  // Bright Red (Shield broken/cooldown)
-pub const COLOR_WARNING: u32 = 0xFFFF8C00;   // Orange (Low durability)
-pub const COLOR_BG: u32 = 0x90101014;        // Semi-transparent dark background
-pub const COLOR_BAR_BG: u32 = 0x60000000;    // Bar background
-pub const COLOR_WHITE: u32 = 0xFFFFFFFF;     // White text
-
 static ENABLED: AtomicBool = AtomicBool::new(true);
+static PULSE_ANIMATION: AtomicBool = AtomicBool::new(true);
+static ENEMY_SHIELDS: AtomicBool = AtomicBool::new(true);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Position {
-    Crosshair, // 0: Compact badge right next to crosshair (PvP favorite)
-    Offhand,   // 1: Beside offhand slot
-    TopLeft,   // 2
-    BottomLeft,// 3
-    TopRight,  // 4
+// 0 represents local player first person; any other value represents a specific entity ID.
+static CURRENT_ENTITY: AtomicU32 = AtomicU32::new(0);
+
+// Tracks entity IDs whose shields are disabled and their expiry time.
+static DISABLED_ENTITIES: Mutex<Option<HashMap<u32, Instant>>> = Mutex::new(None);
+
+pub fn set_current_entity(id: u32) {
+    CURRENT_ENTITY.store(id, Ordering::Relaxed);
 }
 
-impl Position {
-    pub fn from_index(i: usize) -> Self {
-        match i % 5 {
-            0 => Self::Crosshair,
-            1 => Self::Offhand,
-            2 => Self::TopLeft,
-            3 => Self::BottomLeft,
-            _ => Self::TopRight,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Crosshair => "Crosshair (PvP)",
-            Self::Offhand => "Offhand Slot",
-            Self::TopLeft => "Top Left",
-            Self::BottomLeft => "Bottom Left",
-            Self::TopRight => "Top Right",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DisplayMode {
-    Full,     // Text + Cooldown timer + Bar + Durability
-    Compact,  // Cooldown timer + Status dot
-    BarOnly,  // Minimal cooldown bar
-}
-
-impl DisplayMode {
-    pub fn from_index(i: usize) -> Self {
-        match i % 3 {
-            0 => Self::Full,
-            1 => Self::Compact,
-            _ => Self::BarOnly,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Full => "Full (Status + Bar + Durability)",
-            Self::Compact => "Compact (Timer + Dot)",
-            Self::BarOnly => "Bar Only",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Settings {
-    pub enabled: bool,
-    pub position: Position,
-    pub mode: DisplayMode,
-    pub show_target: bool,
-    pub show_durability: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            position: Position::Crosshair,
-            mode: DisplayMode::Full,
-            show_target: true,
-            show_durability: true,
-        }
-    }
-}
-
-impl Settings {
-    pub fn labels(&self) -> Vec<String> {
-        vec![
-            format!(
-                "Shield Statuses: {}",
-                if self.enabled { "ON" } else { "OFF" }
-            ),
-            format!("Position: {}", self.position.name()),
-            format!("Display Mode: {}", self.mode.name()),
-            format!(
-                "Target Shield: {}",
-                if self.show_target { "ON" } else { "OFF" }
-            ),
-            format!(
-                "Durability: {}",
-                if self.show_durability { "ON" } else { "OFF" }
-            ),
-        ]
-    }
-
-    pub fn click(&mut self, button: usize) {
-        match button {
-            0 => self.enabled = !self.enabled,
-            1 => self.position = Position::from_index((self.position as usize) + 1),
-            2 => self.mode = DisplayMode::from_index((self.mode as usize) + 1),
-            3 => self.show_target = !self.show_target,
-            4 => self.show_durability = !self.show_durability,
-            _ => {}
-        }
-        ENABLED.store(self.enabled, Ordering::Relaxed);
-    }
-
-    pub fn stored(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("enabled", if self.enabled { "1" } else { "0" }.into()),
-            ("position", (self.position as usize).to_string()),
-            ("mode", (self.mode as usize).to_string()),
-            ("target", if self.show_target { "1" } else { "0" }.into()),
-            (
-                "durability",
-                if self.show_durability { "1" } else { "0" }.into(),
-            ),
-        ]
-    }
-}
-
-pub fn settings(mut read: impl FnMut(&str) -> Option<String>) -> Settings {
-    let mut s = Settings::default();
-    if let Some(v) = read("enabled") {
-        s.enabled = v == "1" || v.eq_ignore_ascii_case("true");
-    }
-    if let Some(v) = read("position").and_then(|v| v.parse::<usize>().ok()) {
-        s.position = Position::from_index(v);
-    }
-    if let Some(v) = read("mode").and_then(|v| v.parse::<usize>().ok()) {
-        s.mode = DisplayMode::from_index(v);
-    }
-    if let Some(v) = read("target") {
-        s.show_target = v == "1" || v.eq_ignore_ascii_case("true");
-    }
-    if let Some(v) = read("durability") {
-        s.show_durability = v == "1" || v.eq_ignore_ascii_case("true");
-    }
-    ENABLED.store(s.enabled, Ordering::Relaxed);
-    s
+pub fn current_entity() -> u32 {
+    CURRENT_ENTITY.load(Ordering::Relaxed)
 }
 
 pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
-pub fn set_settings(s: Settings) {
-    ENABLED.store(s.enabled, Ordering::Relaxed);
+pub fn toggle_enabled() -> bool {
+    let prev = ENABLED.fetch_xor(true, Ordering::Relaxed);
+    !prev
+}
+
+pub fn pulse_enabled() -> bool {
+    PULSE_ANIMATION.load(Ordering::Relaxed)
+}
+
+pub fn toggle_pulse() -> bool {
+    let prev = PULSE_ANIMATION.fetch_xor(true, Ordering::Relaxed);
+    !prev
+}
+
+pub fn enemy_shields_enabled() -> bool {
+    ENEMY_SHIELDS.load(Ordering::Relaxed)
+}
+
+pub fn toggle_enemy_shields() -> bool {
+    let prev = ENEMY_SHIELDS.fetch_xor(true, Ordering::Relaxed);
+    !prev
+}
+
+pub fn disable_entity(id: u32, duration_secs: f32) {
+    let expiry = Instant::now() + std::time::Duration::from_secs_f32(duration_secs);
+    if let Ok(mut lock) = DISABLED_ENTITIES.lock() {
+        let map = lock.get_or_insert_with(HashMap::new);
+        map.insert(id, expiry);
+    }
+}
+
+pub fn is_entity_disabled(id: u32) -> bool {
+    if let Ok(mut lock) = DISABLED_ENTITIES.lock() {
+        if let Some(map) = lock.as_mut() {
+            let now = Instant::now();
+            if let Some(expiry) = map.get(&id) {
+                if now < *expiry {
+                    return true;
+                } else {
+                    map.remove(&id);
+                }
+            }
+        }
+    }
+    false
 }

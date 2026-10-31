@@ -2,180 +2,202 @@
 use crate::game::Game;
 use crate::game::mod_shield_statuses as m;
 use crate::game::native_hooks::NativeMod;
-use horizon_client::extras_hud::Corners;
-use horizon_client::hud::HudBatch;
+use std::ops::ControlFlow;
 
-pub(super) fn on_hud(
-    game: &mut Game<'_>,
-    batch: &mut HudBatch,
-    _corners: &mut Corners,
+pub(super) fn on_submit_item_lit(
+    game: &Game<'_>,
+    state: &horizon_client::item_render::ItemRenderState,
+    pose: glam::Mat4,
+    light: u32,
+    lights: (glam::Vec3, glam::Vec3),
+    out: &mut Vec<horizon_client::mesher::Vertex>,
+) -> ControlFlow<()> {
+    if !game.native_on(m::ID) || !m::is_enabled() {
+        return ControlFlow::Continue(());
+    }
+
+    let is_shield = state.layers.iter().any(|layer| match &layer.geometry {
+        horizon_client::item_render::LayerGeometry::Special { model, .. } => {
+            matches!(model.kind, horizon_assets::item_model::SpecialKind::Shield)
+        }
+        _ => false,
+    });
+
+    if !is_shield {
+        return ControlFlow::Continue(());
+    }
+
+    let start_idx = out.len();
+
+    let mut sink = horizon_client::item_render::WorldSink {
+        out,
+        light,
+        lights: Some(lights),
+        glint: game.glint(),
+    };
+    state.submit(
+        &game.pack.item_renderer,
+        &game.gui.atlas.sprites,
+        &game.item_host(),
+        pose,
+        &mut sink,
+    );
+
+    apply_shield_shimmer(game, start_idx, out);
+    ControlFlow::Break(())
+}
+
+pub(super) fn on_submit_item_unlit(
+    game: &Game<'_>,
+    state: &horizon_client::item_render::ItemRenderState,
+    pose: glam::Mat4,
+    light: u32,
+    out: &mut Vec<horizon_client::mesher::Vertex>,
+) -> ControlFlow<()> {
+    if !game.native_on(m::ID) || !m::is_enabled() {
+        return ControlFlow::Continue(());
+    }
+
+    let is_shield = state.layers.iter().any(|layer| match &layer.geometry {
+        horizon_client::item_render::LayerGeometry::Special { model, .. } => {
+            matches!(model.kind, horizon_assets::item_model::SpecialKind::Shield)
+        }
+        _ => false,
+    });
+
+    if !is_shield {
+        return ControlFlow::Continue(());
+    }
+
+    let start_idx = out.len();
+
+    let mut sink = horizon_client::item_render::WorldSink {
+        out,
+        light,
+        lights: None,
+        glint: game.glint(),
+    };
+    state.submit(
+        &game.pack.item_renderer,
+        &game.gui.atlas.sprites,
+        &game.item_host(),
+        pose,
+        &mut sink,
+    );
+
+    apply_shield_shimmer(game, start_idx, out);
+    ControlFlow::Break(())
+}
+
+fn apply_shield_shimmer(
+    game: &Game<'_>,
+    start_idx: usize,
+    out: &mut [horizon_client::mesher::Vertex],
 ) {
-    if !game.native_on(m::ID) || game.player.is_none() {
-        return;
-    }
-    let s = {
-        let g = &*game;
-        m::settings(|k| g.native_setting(m::ID, k))
-    };
-    if !s.enabled {
-        return;
-    }
+    let entity_id = m::current_entity();
+    let local_id = game
+        .player_model
+        .as_ref()
+        .map(|p| p.id)
+        .or_else(|| game.remote.as_ref().map(|r| r.entity_id as u32))
+        .unwrap_or(0);
 
-    // Only render in first person, not spectator, not in debug F3
-    if !game.camera_type.first_person() || game.spectator() || game.debug_crosshair() {
-        return;
-    }
+    let is_local = entity_id == 0 || entity_id == local_id;
 
-    // Check if player has a shield equipped (offhand or main hand)
-    let offhand_shield = game.offhand.as_ref().filter(|st| st.item.ends_with("shield") || game.blocks_attacks(st).is_some());
-    let mainhand_shield = game.inventory.get(game.selected).and_then(Option::as_ref).filter(|st| st.item.ends_with("shield") || game.blocks_attacks(st).is_some());
-
-    let shield_stack = offhand_shield.or(mainhand_shield);
-
-    let target_in_reach = game.crosshair_living().is_some();
-    if shield_stack.is_none() && (!s.show_target || !target_in_reach) {
-        return;
-    }
-
-    let (wi, hi) = game.gui_size();
-    if wi <= 0.0 || hi <= 0.0 {
-        return;
-    }
-
-    // Determine state of own shield
-    let (status_text, status_color, cooldown_prog, is_on_cooldown) = if let Some(_stack) = shield_stack {
-        let cd_ticks = game.shield_cooldown;
-        if cd_ticks > 0 {
-            let secs = cd_ticks as f32 / 20.0;
-            let prog = 1.0 - (cd_ticks as f32 / 100.0).clamp(0.0, 1.0);
-            (format!("{:.1}s", secs), m::COLOR_DISABLED, prog, true)
-        } else if game.using.is_some() {
-            ("BLOCKING".to_string(), m::COLOR_BLOCKING, 1.0, false)
-        } else {
-            ("READY".to_string(), m::COLOR_READY, 1.0, false)
-        }
+    let is_disabled = if is_local {
+        game.shield_cooldown > 0
     } else {
-        ("NONE".to_string(), m::COLOR_WHITE, 0.0, false)
+        if !m::enemy_shields_enabled() {
+            return;
+        }
+        m::is_entity_disabled(entity_id)
     };
 
-    // Durability of own shield
-    let dur_text = if s.show_durability {
-        if let Some(stack) = shield_stack {
-            let max_dur = game.items().get(&stack.item).map_or(336, |i| i.max_damage);
-            let cur_dur = max_dur.saturating_sub(stack.damage);
-            Some(cur_dur)
-        } else {
-            None
-        }
+    let time = game.started.elapsed().as_secs_f32();
+    let pulse = if m::pulse_enabled() {
+        1.0 + 0.12 * (time * 4.5).sin()
     } else {
-        None
+        1.0
     };
 
-    // Calculate center coordinates
-    let cx = ((wi - 15.0) / 2.0).floor() + 7.0;
-    let cy = ((hi - 15.0) / 2.0).floor() + 7.0;
+    for v in &mut out[start_idx..] {
+        let [r, g, b, a] = v.color.to_le_bytes();
+        let (nr, ng, nb) = if is_disabled {
+            // Vivid Crimson Red glow (matching user sample)
+            let nr = (((r as f32) * 1.30 + 35.0) * pulse).clamp(0.0, 255.0) as u8;
+            let ng = ((g as f32) * 0.05).clamp(0.0, 255.0) as u8;
+            let nb = (((b as f32) * 0.20 + 8.0) * pulse).clamp(0.0, 255.0) as u8;
+            (nr, ng, nb)
+        } else {
+            // Vivid Emerald Green glow (matching user sample)
+            let nr = (((r as f32) * 0.18 + 5.0) * pulse).clamp(0.0, 255.0) as u8;
+            let ng = (((g as f32) * 1.30 + 35.0) * pulse).clamp(0.0, 255.0) as u8;
+            let nb = (((b as f32) * 0.22 + 8.0) * pulse).clamp(0.0, 255.0) as u8;
+            (nr, ng, nb)
+        };
+        v.color = u32::from_le_bytes([nr, ng, nb, a]);
+    }
+}
 
-    let (base_x, base_y) = match s.position {
-        m::Position::Crosshair => {
-            // Center of screen, 16px to the right of crosshair
-            (cx + 16.0, cy - 8.0)
+pub(super) fn on_hand_geometry(_game: &mut Game<'_>) {
+    m::set_current_entity(0);
+}
+
+pub(super) fn on_held_item_geometry(mob: &horizon_client::mobs::Mob) {
+    m::set_current_entity(mob.id);
+}
+
+pub(super) fn on_armor_stand_items(a: &horizon_client::entities::ArmorStand) {
+    m::set_current_entity(a.id);
+}
+
+pub(super) fn on_handle_packet(
+    game: &mut Game<'_>,
+    packet: &horizon_protocol::packets::play::Clientbound,
+) {
+    use horizon_protocol::packets::play::Clientbound as C;
+    match packet {
+        C::EntityEvent(p) => {
+            // Status 30 in Minecraft: LivingEntity.handleEntityEvent(30) -> Shield break / disabled
+            if p.event == 30 {
+                m::disable_entity(p.id as u32, 5.0);
+            }
         }
-        m::Position::Offhand => {
-            let center = (wi * 0.5).floor();
-            let is_left = !game.settings.main_hand_left;
-            let offhand_x = if is_left { center - 120.0 } else { center + 104.0 };
-            (offhand_x, hi - 24.0)
-        }
-        m::Position::TopLeft => (8.0, 8.0),
-        m::Position::BottomLeft => (8.0, hi - 36.0),
-        m::Position::TopRight => (wi - 68.0, 8.0),
-    };
-
-    // 1. Render player's own shield badge
-    if shield_stack.is_some() {
-        match s.mode {
-            m::DisplayMode::Full => {
-                let badge_w = 52.0;
-                let badge_h = 16.0;
-
-                // Dark background
-                game.native_fill(batch, [base_x, base_y, badge_w, badge_h], m::COLOR_BG);
-                // Status color accent bar on left edge
-                game.native_fill(batch, [base_x, base_y, 2.0, badge_h], status_color);
-
-                // Status text (READY / BLOCKING / 4.2s)
-                game.native_text(batch, &status_text, [base_x + 5.0, base_y + 2.0], status_color, true);
-
-                // Durability count on the right
-                if let Some(dur) = dur_text {
-                    let dur_str = dur.to_string();
-                    let dur_w = game.native_text_width(&dur_str);
-                    let dur_color = if dur < 30 { m::COLOR_WARNING } else { 0xFFAAAAAA };
-                    game.native_text(batch, &dur_str, [base_x + badge_w - dur_w - 3.0, base_y + 2.0], dur_color, true);
-                }
-
-                // Cooldown recovery progress bar (if on cooldown)
-                if is_on_cooldown {
-                    let bar_w = badge_w - 6.0;
-                    game.native_fill(batch, [base_x + 4.0, base_y + 12.0, bar_w, 2.0], m::COLOR_BAR_BG);
-                    let fill_w = (bar_w * cooldown_prog).clamp(0.0, bar_w);
-                    if fill_w > 0.0 {
-                        game.native_fill(batch, [base_x + 4.0, base_y + 12.0, fill_w, 2.0], status_color);
+        C::Sound(p) => {
+            if let Some(name) = game.remote_sound_name(&p.sound) {
+                if name.ends_with("shield.break") || name.contains("shield.break") {
+                    let at = [
+                        f64::from(p.x) / 8.0,
+                        f64::from(p.y) / 8.0,
+                        f64::from(p.z) / 8.0,
+                    ];
+                    let mut closest: Option<(u32, f64)> = None;
+                    for mob in &game.mobs {
+                        let dx = mob.position.x - at[0];
+                        let dy = mob.position.y - at[1];
+                        let dz = mob.position.z - at[2];
+                        let dist_sq = dx * dx + dy * dy + dz * dz;
+                        if dist_sq < 64.0 && closest.map_or(true, |(_, d)| dist_sq < d) {
+                            closest = Some((mob.id, dist_sq));
+                        }
                     }
-                }
-            }
-            m::DisplayMode::Compact => {
-                if is_on_cooldown {
-                    game.native_fill(batch, [base_x, base_y, 28.0, 12.0], m::COLOR_BG);
-                    game.native_text(batch, &status_text, [base_x + 2.0, base_y + 2.0], status_color, true);
-                } else {
-                    // Small 5x5 indicator pip
-                    game.native_fill(batch, [base_x, base_y + 5.0, 5.0, 5.0], status_color);
-                }
-            }
-            m::DisplayMode::BarOnly => {
-                if is_on_cooldown {
-                    let bar_w = 20.0;
-                    let bar_x = (cx - bar_w / 2.0).floor();
-                    let bar_y = cy + 14.0;
-                    game.native_fill(batch, [bar_x, bar_y, bar_w, 2.0], m::COLOR_BAR_BG);
-                    let fill_w = (bar_w * cooldown_prog).clamp(0.0, bar_w);
-                    if fill_w > 0.0 {
-                        game.native_fill(batch, [bar_x, bar_y, fill_w, 2.0], status_color);
+                    if let Some((id, _)) = closest {
+                        m::disable_entity(id, 5.0);
                     }
                 }
             }
         }
-    }
-
-    // 2. Render target shield indicator when hovering living target in reach
-    if s.show_target && target_in_reach {
-        // Target indicator placed above crosshair
-        let tag = "SHIELD READY";
-        let tag_w = game.native_text_width(tag);
-        let tag_x = (cx - tag_w / 2.0).floor();
-        let tag_y = cy - 16.0;
-        game.native_fill(batch, [tag_x - 3.0, tag_y - 1.0, tag_w + 6.0, 11.0], m::COLOR_BG);
-        game.native_text(batch, tag, [tag_x, tag_y], m::COLOR_READY, true);
+        _ => {}
     }
 }
 
 pub(super) fn on_key(game: &mut Game<'_>, key: &str, pressed: bool) {
-    if !pressed || !game.native_on(m::ID) || !game.native_playing() {
+    if !pressed || !game.native_on(m::ID) {
         return;
     }
-    let mut s = {
-        let g = &*game;
-        m::settings(|k| g.native_setting(m::ID, k))
-    };
-
     let toggle_key = game.native_mod_key(m::ID, m::KEY_TOGGLE, m::KEY_TOGGLE_DEFAULT);
     if key == toggle_key && toggle_key != "key.keyboard.unknown" {
-        s.enabled = !s.enabled;
-        m::set_settings(s.clone());
-        for (k, v) in s.stored() {
-            game.native_set_setting(m::ID, k, &v);
-        }
+        m::toggle_enabled();
     }
 }
 
@@ -192,26 +214,37 @@ pub(super) fn on_list(mods: &mut Vec<NativeMod>) {
     });
 }
 
-pub(super) fn on_settings(game: &mut Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
+pub(super) fn on_settings(_game: &mut Game<'_>, mod_id: &str, buttons: &mut Vec<String>) {
     if mod_id != m::ID {
         return;
     }
-    let g = &*game;
-    let s = m::settings(|key| g.native_setting(m::ID, key));
-    buttons.extend(s.labels());
+    let enabled_str = if m::is_enabled() { "ON" } else { "OFF" };
+    let pulse_str = if m::pulse_enabled() { "PULSE" } else { "STATIC" };
+    let enemy_str = if m::enemy_shields_enabled() { "ON" } else { "OFF" };
+
+    buttons.push(format!("Mod Status: {enabled_str}"));
+    buttons.push(format!("Shimmer Effect: {pulse_str}"));
+    buttons.push(format!("Enemy Shields: {enemy_str}"));
 }
 
-pub(super) fn on_click(game: &mut Game<'_>, mod_id: &str, button: usize) {
+pub(super) fn on_click(
+    _game: &mut Game<'_>,
+    mod_id: &str,
+    button: usize,
+) {
     if mod_id != m::ID {
         return;
     }
-    let mut s = {
-        let g = &*game;
-        m::settings(|key| g.native_setting(m::ID, key))
-    };
-    s.click(button);
-    m::set_settings(s.clone());
-    for (key, value) in s.stored() {
-        game.native_set_setting(m::ID, key, &value);
+    match button {
+        0 => {
+            m::toggle_enabled();
+        }
+        1 => {
+            m::toggle_pulse();
+        }
+        2 => {
+            m::toggle_enemy_shields();
+        }
+        _ => {}
     }
 }

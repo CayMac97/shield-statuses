@@ -19,14 +19,69 @@ name = "mod_shield_statuses_glue"
 source = "glue.rs"
 
 [[injection]]
-id = "hud"
+id = "submit_item_lit"
 kind = "HEAD"
-target = "horizon_client::game::native_hooks::Game<'_>::native_hud"
-helper = "hud.rs"
+cancellable = true
+target = "horizon_client::game::item_draw::Game<'_>::submit_item_lit"
+helper = "submit_item_lit.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "state", ty = "&horizon_client::item_render::ItemRenderState", value = "state" },
+  { name = "pose", ty = "glam::Mat4", value = "pose" },
+  { name = "light", ty = "u32", value = "light" },
+  { name = "lights", ty = "(glam::Vec3, glam::Vec3)", value = "lights" },
+  { name = "out", ty = "&mut Vec<horizon_client::mesher::Vertex>", value = "&mut *out" },
+]
+
+[[injection]]
+id = "submit_item_unlit"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::item_draw::Game<'_>::submit_item_unlit"
+helper = "submit_item_unlit.rs"
+bindings = [
+  { name = "game", ty = "&crate::game::Game<'_>", value = "&*self" },
+  { name = "state", ty = "&horizon_client::item_render::ItemRenderState", value = "state" },
+  { name = "pose", ty = "glam::Mat4", value = "pose" },
+  { name = "light", ty = "u32", value = "light" },
+  { name = "out", ty = "&mut Vec<horizon_client::mesher::Vertex>", value = "&mut *out" },
+]
+
+[[injection]]
+id = "hand_geometry"
+kind = "HEAD"
+target = "horizon_client::game::Game<'_>::hand_geometry"
+helper = "hand_geometry.rs"
 bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
-  { name = "batch", ty = "&mut horizon_client::hud::HudBatch", value = "&mut *batch" },
-  { name = "corners", ty = "&mut horizon_client::extras_hud::Corners", value = "&mut *corners" },
+]
+
+[[injection]]
+id = "held_item_geometry"
+kind = "HEAD"
+target = "horizon_client::game::mob_blocks::Game<'_>::held_item_geometry"
+helper = "held_item_geometry.rs"
+bindings = [
+  { name = "mob", ty = "&horizon_client::mobs::Mob", value = "mob" },
+]
+
+[[injection]]
+id = "armor_stand_items"
+kind = "HEAD"
+target = "horizon_client::game::armor_stands::Game<'_>::armor_stand_items"
+helper = "armor_stand_items.rs"
+bindings = [
+  { name = "a", ty = "&horizon_client::entities::ArmorStand", value = "a" },
+]
+
+[[injection]]
+id = "handle_packet"
+kind = "HEAD"
+target = "horizon_client::game::remote::Game<'_>::handle_packet"
+helper = "handle_packet.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "packet", ty = "&horizon_protocol::packets::play::Clientbound", value = "&packet" },
 ]
 
 [[injection]]

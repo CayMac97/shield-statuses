@@ -1,22 +1,17 @@
-# Shield Statuses for Horizon
+# Shield Statuses (Horizon Native Mod)
 
-A native Rust mixin mod for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft: Java Edition 26.3) created by **CayMac**, inspired by the popular Java mod **Shield Statuses** (Walksy):
+A native Horizon 26.3 mod by **CayMac**:
 
-## Features
+- **3D Shield Shimmer:** Dynamic visual status directly on the in-game 3D shield model without any screen timers or HUD clutter.
+- **Visual Statuses:**
+  - **Emerald Green Shimmer:** Shield is functional and ready to block incoming attacks.
+  - **Crimson Red Shimmer:** Shield has been disabled by an axe hit and is on cooldown.
+- **Both Player & Opponents:** Applies seamlessly to your own shield (in first-person and third-person) as well as opponents' and mobs' shields.
+- **PvP Clean:** 100% clean screen without immersion-breaking HUD timers.
+- **Configurable:** Toggle shimmer pulse animation or enemy shield tracking in Options > Mods > Shield Statuses.
 
-- **Live Shield Cooldown Countdown:** Shows precise countdown timer (e.g. `4.8s`, `3.2s`, `0.5s`) when your shield is disabled by an axe.
-- **Real-Time Status Indicator:**
-  - **Ready (Spring Green):** Shield is fully charged and ready to block.
-  - **Blocking (Vivid Cyan):** Shield is raised and actively blocking damage.
-  - **Disabled (Bright Red):** Shield is disabled with countdown & progress bar.
-- **Durability Tracking & Low-Durability Warning:** Shows remaining durability and turns orange/red when low (< 30).
-- **Multiple Placement Options:**
-  - **Crosshair Anchor (Default / PvP Favorite):** Placed right beside the crosshair for zero-latency combat awareness.
-  - **Offhand Slot:** Placed neatly beside the offhand hotbar slot.
-  - **HUD Corners:** Top-Left, Bottom-Left, Top-Right.
-- **3 Display Modes:** Full (Status + Bar + Durability), Compact (Timer + Dot), Bar Only.
-- **Customizable:** Configure everything in Options > Mods > Shield Statuses.
+## Installation
 
-## License
+This mod is built as a native Horizon `.hnmod` and compiled directly into the client via `horizon-launcher`.
 
-MIT © Copyright 2026 CayMac
+Minisign public key: `RWS411U2KXdTN4/y5bQhqBYxNlZvCtSZ5lNy46eeSAcgy0cxSJo2+Sm3`
