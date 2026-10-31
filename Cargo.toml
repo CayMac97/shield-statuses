@@ -1,0 +1,11 @@
+[package]
+name = "horizon-mod-shield-statuses"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["CayMac"]
+description = "Shield Statuses for Horizon: PvP shield awareness with live cooldown timer, readiness, durability, and target shield status."
+repository = "https://github.com/CayMac97/shield-statuses"
+
+[lib]
+path = "src/lib.rs"
