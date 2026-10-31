@@ -21,6 +21,10 @@ static ENEMY_SHIELDS: AtomicBool = AtomicBool::new(true);
 
 // 0 represents local player first person; any other value represents a specific entity ID.
 static CURRENT_ENTITY: AtomicU32 = AtomicU32::new(0);
+static CURRENT_BLOCKING: AtomicBool = AtomicBool::new(false);
+
+// Local player disabled expiry from server packets
+static LOCAL_DISABLED_EXPIRY: Mutex<Option<Instant>> = Mutex::new(None);
 
 // Tracks entity IDs whose shields are disabled and their expiry time.
 static DISABLED_ENTITIES: Mutex<Option<HashMap<u32, Instant>>> = Mutex::new(None);
@@ -31,6 +35,14 @@ pub fn set_current_entity(id: u32) {
 
 pub fn current_entity() -> u32 {
     CURRENT_ENTITY.load(Ordering::Relaxed)
+}
+
+pub fn set_current_blocking(blocking: bool) {
+    CURRENT_BLOCKING.store(blocking, Ordering::Relaxed);
+}
+
+pub fn current_blocking() -> bool {
+    CURRENT_BLOCKING.load(Ordering::Relaxed)
 }
 
 pub fn is_enabled() -> bool {
@@ -60,11 +72,42 @@ pub fn toggle_enemy_shields() -> bool {
     !prev
 }
 
+pub fn set_local_disabled(disabled: bool, duration_secs: f32) {
+    if let Ok(mut lock) = LOCAL_DISABLED_EXPIRY.lock() {
+        if disabled {
+            *lock = Some(Instant::now() + std::time::Duration::from_secs_f32(duration_secs));
+        } else {
+            *lock = None;
+        }
+    }
+}
+
+pub fn is_local_disabled() -> bool {
+    if let Ok(mut lock) = LOCAL_DISABLED_EXPIRY.lock() {
+        if let Some(expiry) = *lock {
+            if Instant::now() < expiry {
+                return true;
+            } else {
+                *lock = None;
+            }
+        }
+    }
+    false
+}
+
 pub fn disable_entity(id: u32, duration_secs: f32) {
     let expiry = Instant::now() + std::time::Duration::from_secs_f32(duration_secs);
     if let Ok(mut lock) = DISABLED_ENTITIES.lock() {
         let map = lock.get_or_insert_with(HashMap::new);
         map.insert(id, expiry);
+    }
+}
+
+pub fn clear_entity_disabled(id: u32) {
+    if let Ok(mut lock) = DISABLED_ENTITIES.lock() {
+        if let Some(map) = lock.as_mut() {
+            map.remove(&id);
+        }
     }
 }
 

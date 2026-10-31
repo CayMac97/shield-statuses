@@ -94,6 +94,12 @@ fn apply_shield_shimmer(
     start_idx: usize,
     out: &mut [horizon_client::mesher::Vertex],
 ) {
+    // If the shield is actively raised and blocking attacks, it is functional!
+    if m::current_blocking() {
+        tint_shield(game, start_idx, out, false);
+        return;
+    }
+
     let entity_id = m::current_entity();
     let local_id = game
         .player_model
@@ -105,7 +111,32 @@ fn apply_shield_shimmer(
     let is_local = entity_id == 0 || entity_id == local_id;
 
     let is_disabled = if is_local {
-        game.shield_cooldown > 0
+        // If local player is using/blocking, definitely ready!
+        if game.using.is_some() {
+            false
+        } else {
+            // Check all sources of cooldown for local player:
+            let offhand_cd = game.offhand.as_ref().is_some_and(|s| {
+                game.cooldowns.is_on_cooldown(&s.item)
+                    || game.cooldowns.is_on_cooldown(s.item.trim_start_matches("minecraft:"))
+            });
+            let mainhand_cd = game
+                .inventory
+                .get(game.selected)
+                .and_then(Option::as_ref)
+                .is_some_and(|s| {
+                    game.cooldowns.is_on_cooldown(&s.item)
+                        || game.cooldowns.is_on_cooldown(s.item.trim_start_matches("minecraft:"))
+                });
+
+            game.shield_cooldown > 0
+                || game.cooldowns.is_on_cooldown("minecraft:shield")
+                || game.cooldowns.is_on_cooldown("shield")
+                || offhand_cd
+                || mainhand_cd
+                || m::is_local_disabled()
+                || (local_id != 0 && m::is_entity_disabled(local_id))
+        }
     } else {
         if !m::enemy_shields_enabled() {
             return;
@@ -113,6 +144,15 @@ fn apply_shield_shimmer(
         m::is_entity_disabled(entity_id)
     };
 
+    tint_shield(game, start_idx, out, is_disabled);
+}
+
+fn tint_shield(
+    game: &Game<'_>,
+    start_idx: usize,
+    out: &mut [horizon_client::mesher::Vertex],
+    is_disabled: bool,
+) {
     let time = game.started.elapsed().as_secs_f32();
     let pulse = if m::pulse_enabled() {
         1.0 + 0.12 * (time * 4.5).sin()
@@ -139,16 +179,24 @@ fn apply_shield_shimmer(
     }
 }
 
-pub(super) fn on_hand_geometry(_game: &mut Game<'_>) {
+pub(super) fn on_hand_geometry(game: &mut Game<'_>) {
     m::set_current_entity(0);
+    m::set_current_blocking(game.using.is_some());
 }
 
 pub(super) fn on_held_item_geometry(mob: &horizon_client::mobs::Mob) {
     m::set_current_entity(mob.id);
+    let is_blocking = mob.extra.blocking || (mob.extra.using_item > 0 && mob.extra.using_off_hand);
+    if is_blocking {
+        // If the entity is actively raising/using their shield, clear disabled state!
+        m::clear_entity_disabled(mob.id);
+    }
+    m::set_current_blocking(is_blocking);
 }
 
 pub(super) fn on_armor_stand_items(a: &horizon_client::entities::ArmorStand) {
     m::set_current_entity(a.id);
+    m::set_current_blocking(false);
 }
 
 pub(super) fn on_handle_packet(
@@ -156,33 +204,44 @@ pub(super) fn on_handle_packet(
     packet: &horizon_protocol::packets::play::Clientbound,
 ) {
     use horizon_protocol::packets::play::Clientbound as C;
+    let local_id = game
+        .player_model
+        .as_ref()
+        .map(|p| p.id)
+        .or_else(|| game.remote.as_ref().map(|r| r.entity_id as u32))
+        .unwrap_or(0);
+
     match packet {
         C::EntityEvent(p) => {
-            // Status 30 in Minecraft: LivingEntity.handleEntityEvent(30) -> Shield break / disabled
+            let id = p.id as u32;
             if p.event == 30 {
-                m::disable_entity(p.id as u32, 5.0);
+                // Status 30: Shield broken / disabled by an axe hit
+                m::disable_entity(id, 5.0);
+                if id == local_id {
+                    m::set_local_disabled(true, 5.0);
+                }
+            } else if p.event == 29 {
+                // Status 29: Shield blocked an attack successfully -> definitely functional!
+                m::clear_entity_disabled(id);
+                if id == local_id {
+                    m::set_local_disabled(false, 0.0);
+                }
             }
         }
-        C::Sound(p) => {
-            if let Some(name) = game.remote_sound_name(&p.sound) {
-                if name.ends_with("shield.break") || name.contains("shield.break") {
-                    let at = [
-                        f64::from(p.x) / 8.0,
-                        f64::from(p.y) / 8.0,
-                        f64::from(p.z) / 8.0,
-                    ];
-                    let mut closest: Option<(u32, f64)> = None;
-                    for mob in &game.mobs {
-                        let dx = mob.position.x - at[0];
-                        let dy = mob.position.y - at[1];
-                        let dz = mob.position.z - at[2];
-                        let dist_sq = dx * dx + dy * dy + dz * dz;
-                        if dist_sq < 64.0 && closest.map_or(true, |(_, d)| dist_sq < d) {
-                            closest = Some((mob.id, dist_sq));
-                        }
+        C::Cooldown(p) => {
+            // When the server sets an item cooldown for shields on the local player:
+            let g = p.group.as_str();
+            if g == "minecraft:shield" || g == "shield" || g.ends_with("shield") {
+                if p.duration > 0 {
+                    let secs = p.duration as f32 / 20.0;
+                    m::set_local_disabled(true, secs);
+                    if local_id != 0 {
+                        m::disable_entity(local_id, secs);
                     }
-                    if let Some((id, _)) = closest {
-                        m::disable_entity(id, 5.0);
+                } else {
+                    m::set_local_disabled(false, 0.0);
+                    if local_id != 0 {
+                        m::clear_entity_disabled(local_id);
                     }
                 }
             }
